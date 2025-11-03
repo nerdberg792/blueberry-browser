@@ -2,6 +2,7 @@ import { WebContents } from "electron";
 import { streamText, type LanguageModel, type CoreMessage } from "ai";
 import { openai } from "@ai-sdk/openai";
 import { anthropic } from "@ai-sdk/anthropic";
+import { google } from "@ai-sdk/google";
 import * as dotenv from "dotenv";
 import { join } from "path";
 import type { Window } from "./Window";
@@ -19,11 +20,12 @@ interface StreamChunk {
   isComplete: boolean;
 }
 
-type LLMProvider = "openai" | "anthropic";
+type LLMProvider = "openai" | "anthropic" | "gemini";
 
 const DEFAULT_MODELS: Record<LLMProvider, string> = {
   openai: "gpt-4o-mini",
   anthropic: "claude-3-5-sonnet-20241022",
+  gemini: "gemini-2.5-pro",
 };
 
 const MAX_CONTEXT_LENGTH = 4000;
@@ -54,6 +56,7 @@ export class LLMClient {
   private getProvider(): LLMProvider {
     const provider = process.env.LLM_PROVIDER?.toLowerCase();
     if (provider === "anthropic") return "anthropic";
+    if (provider === "gemini" || provider === "google") return "gemini";
     return "openai"; // Default to OpenAI
   }
 
@@ -70,6 +73,8 @@ export class LLMClient {
         return anthropic(this.modelName);
       case "openai":
         return openai(this.modelName);
+      case "gemini":
+        return google(this.modelName);
       default:
         return null;
     }
@@ -81,6 +86,11 @@ export class LLMClient {
         return process.env.ANTHROPIC_API_KEY;
       case "openai":
         return process.env.OPENAI_API_KEY;
+      case "gemini":
+        return (
+          process.env.GOOGLE_GENERATIVE_AI_API_KEY ||
+          process.env.GEMINI_API_KEY
+        );
       default:
         return undefined;
     }
@@ -93,7 +103,11 @@ export class LLMClient {
       );
     } else {
       const keyName =
-        this.provider === "anthropic" ? "ANTHROPIC_API_KEY" : "OPENAI_API_KEY";
+        this.provider === "anthropic"
+          ? "ANTHROPIC_API_KEY"
+          : this.provider === "gemini"
+          ? "GOOGLE_GENERATIVE_AI_API_KEY"
+          : "OPENAI_API_KEY";
       console.error(
         `❌ LLM Client initialization failed: ${keyName} not found in environment variables.\n` +
           `Please add your API key to the .env file in the project root.`
