@@ -173,6 +173,12 @@ export class EventManager {
     ipcMain.handle("sidebar-get-messages", () => {
       return this.mainWindow.sidebar.client.getMessages();
     });
+
+    // Clear injected styles in the active tab
+    ipcMain.handle("clear-style-injection", async () => {
+      await this.mainWindow.sidebar.client.clearInjectedStyles();
+      return true;
+    });
   }
 
   private handlePageContentEvents(): void {

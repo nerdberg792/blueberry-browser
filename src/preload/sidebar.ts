@@ -3,12 +3,14 @@ import { electronAPI } from "@electron-toolkit/preload";
 
 interface ChatRequest {
   message: string;
-  context: {
+  context?: {
     url: string | null;
     content: string | null;
     text: string | null;
   };
   messageId: string;
+  styleMode?: boolean;
+  lockStyles?: boolean;
 }
 
 interface ChatResponse {
@@ -49,6 +51,9 @@ const sidebarAPI = {
   getPageContent: () => electronAPI.ipcRenderer.invoke("get-page-content"),
   getPageText: () => electronAPI.ipcRenderer.invoke("get-page-text"),
   getCurrentUrl: () => electronAPI.ipcRenderer.invoke("get-current-url"),
+
+  // Styles
+  clearStyleInjection: () => electronAPI.ipcRenderer.invoke("clear-style-injection"),
 
   // Tab information
   getActiveTabInfo: () => electronAPI.ipcRenderer.invoke("get-active-tab-info"),

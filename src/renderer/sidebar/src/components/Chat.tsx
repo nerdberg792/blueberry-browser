@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect, useLayoutEffect } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import remarkBreaks from 'remark-breaks'
-import { ArrowUp, Square, Sparkles, Plus } from 'lucide-react'
+import { ArrowUp, Sparkles, Plus } from 'lucide-react'
 import { useChat } from '../contexts/ChatContext'
 import { cn } from '@common/lib/utils'
 import { Button } from '@common/components/Button'
@@ -158,6 +158,7 @@ const ChatInput: React.FC<{
     const [value, setValue] = useState('')
     const [isFocused, setIsFocused] = useState(false)
     const textareaRef = useRef<HTMLTextAreaElement>(null)
+    const { styleMode, setStyleMode } = useChat()
 
     // Auto-resize textarea
     useEffect(() => {
@@ -193,6 +194,41 @@ const ChatInput: React.FC<{
             "shadow-chat animate-spring-scale outline-none transition-all duration-200",
             isFocused ? "border-primary/20 dark:border-primary/30" : "border-border"
         )}>
+            {/* Mode/Style controls */}
+            <div className="w-full flex flex-col gap-2 px-3 pb-2">
+                {/* Row 1: Style mode pill */}
+                <div className="w-full flex items-center justify-between">
+                    <button
+                        onClick={() => setStyleMode(!styleMode)}
+                        className={cn(
+                            "inline-flex items-center gap-2 px-3 py-1.5 rounded-full border transition-colors",
+                            styleMode
+                                ? "bg-primary/10 border-primary text-primary"
+                                : "bg-muted border-border text-foreground hover:bg-muted/80"
+                        )}
+                        title="Toggle Style mode"
+                    >
+                        <Sparkles className={cn("size-4", styleMode ? "text-primary" : "text-foreground")} />
+                        <span className="text-sm">Style mode</span>
+                    </button>
+                </div>
+                {/* Row 2: Reset controls (collapsible, no reserved space) */}
+                <div
+                    className={cn(
+                        "w-full flex items-center gap-2 transition-all overflow-hidden",
+                        styleMode ? "max-h-10 opacity-100" : "max-h-0 opacity-0 pointer-events-none"
+                    )}
+                >
+                    <button
+                        onClick={() => window.sidebarAPI.clearStyleInjection()}
+                        className="text-xs px-2 py-1 rounded-md bg-muted hover:opacity-80 text-foreground"
+                        title="Remove injected styles"
+                    >
+                        Reset styles
+                    </button>
+                </div>
+            </div>
+
             {/* Input Area */}
             <div className="w-full px-3 py-2">
                 <div className="w-full flex items-start gap-3">

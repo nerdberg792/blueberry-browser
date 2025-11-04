@@ -16,6 +16,10 @@ interface ChatContextType {
     sendMessage: (content: string) => Promise<void>
     clearChat: () => void
 
+    // Mode
+    styleMode: boolean
+    setStyleMode: (value: boolean) => void
+
     // Page content access
     getPageContent: () => Promise<string | null>
     getPageText: () => Promise<string | null>
@@ -35,6 +39,7 @@ export const useChat = () => {
 export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
     const [messages, setMessages] = useState<Message[]>([])
     const [isLoading, setIsLoading] = useState(false)
+    const [styleMode, setStyleMode] = useState(false)
 
     // Load initial messages from main process
     useEffect(() => {
@@ -70,7 +75,9 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
             // Send message to main process (which will handle context)
             await window.sidebarAPI.sendChatMessage({
                 message: content,
-                messageId: messageId
+                messageId: messageId,
+                styleMode: styleMode,
+                lockStyles: styleMode ? true : undefined
             })
 
             // Messages will be updated via the chat-messages-updated event
@@ -79,7 +86,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
         } finally {
             setIsLoading(false)
         }
-    }, [])
+    }, [styleMode])
 
     const clearChat = useCallback(async () => {
         try {
@@ -157,7 +164,10 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
         clearChat,
         getPageContent,
         getPageText,
-        getCurrentUrl
+        getCurrentUrl,
+        styleMode,
+        setStyleMode,
+        
     }
 
     return (

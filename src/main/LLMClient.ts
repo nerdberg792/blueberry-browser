@@ -13,6 +13,8 @@ dotenv.config({ path: join(__dirname, "../../.env") });
 interface ChatRequest {
   message: string;
   messageId: string;
+  styleMode?: boolean;
+  lockStyles?: boolean;
 }
 
 interface StreamChunk {
@@ -38,6 +40,7 @@ export class LLMClient {
   private readonly modelName: string;
   private readonly model: LanguageModel | null;
   private messages: CoreMessage[] = [];
+  private styleCssKeyByTabId: Map<string, string> = new Map();
 
   constructor(webContents: WebContents) {
     this.webContents = webContents;
@@ -119,14 +122,25 @@ export class LLMClient {
     try {
       // Get screenshot from active tab if available
       let screenshot: string | null = null;
+      let pageHtml: string | null = null;
+      let activeTabId: string | null = null;
       if (this.window) {
         const activeTab = this.window.activeTab;
         if (activeTab) {
+          activeTabId = activeTab.id;
           try {
             const image = await activeTab.screenshot();
             screenshot = image.toDataURL();
           } catch (error) {
             console.error("Failed to capture screenshot:", error);
+          }
+
+          if (request.styleMode) {
+            try {
+              pageHtml = await activeTab.getTabHtml();
+            } catch (error) {
+              console.error("Failed to get page HTML:", error);
+            }
           }
         }
       }
@@ -167,8 +181,12 @@ export class LLMClient {
         return;
       }
 
-      const messages = await this.prepareMessagesWithContext(request);
-      await this.streamResponse(messages, request.messageId);
+      const messages = await this.prepareMessagesWithContext(request, pageHtml);
+      await this.streamResponse(messages, request.messageId, {
+        styleMode: !!request.styleMode,
+        activeTabId,
+        lockStyles: !!request.lockStyles,
+      });
     } catch (error) {
       console.error("Error in LLM request:", error);
       this.handleStreamError(error, request.messageId);
@@ -188,7 +206,7 @@ export class LLMClient {
     this.webContents.send("chat-messages-updated", this.messages);
   }
 
-  private async prepareMessagesWithContext(_request: ChatRequest): Promise<CoreMessage[]> {
+  private async prepareMessagesWithContext(request: ChatRequest, pageHtml: string | null): Promise<CoreMessage[]> {
     // Get page context from active tab
     let pageUrl: string | null = null;
     let pageText: string | null = null;
@@ -208,7 +226,9 @@ export class LLMClient {
     // Build system message
     const systemMessage: CoreMessage = {
       role: "system",
-      content: this.buildSystemPrompt(pageUrl, pageText),
+      content: request.styleMode
+        ? this.buildStyleModeSystemPrompt(pageUrl, pageHtml)
+        : this.buildSystemPrompt(pageUrl, pageText),
     };
 
     // Include all messages in history (system + conversation)
@@ -239,6 +259,30 @@ export class LLMClient {
     return parts.join("\n");
   }
 
+  private buildStyleModeSystemPrompt(url: string | null, pageHtml: string | null): string {
+    const parts: string[] = [
+      "You are a front-end stylist. Output ONLY raw CSS, no explanations.",
+      "Rules:",
+      "- Do not include <style> tags or Markdown fences.",
+      "- Target existing elements/classes from the provided HTML.",
+      "- Non-destructive visual changes only (colors, spacing, typography, subtle layout).",
+      "- Avoid animations that hinder usability; keep it tasteful/funky.",
+      "- Prefer CSS variables if present; otherwise direct properties are fine.",
+    ];
+
+    if (url) {
+      parts.push(`\nCurrent page URL: ${url}`);
+    }
+
+    if (pageHtml) {
+      const truncated = this.truncateText(pageHtml, MAX_CONTEXT_LENGTH);
+      parts.push(`\nPage HTML (truncated):\n${truncated}`);
+    }
+
+    parts.push("\nReturn only valid CSS.");
+    return parts.join("\n");
+  }
+
   private truncateText(text: string, maxLength: number): string {
     if (text.length <= maxLength) return text;
     return text.substring(0, maxLength) + "...";
@@ -246,7 +290,8 @@ export class LLMClient {
 
   private async streamResponse(
     messages: CoreMessage[],
-    messageId: string
+    messageId: string,
+    options?: { styleMode: boolean; activeTabId: string | null; lockStyles: boolean }
   ): Promise<void> {
     if (!this.model) {
       throw new Error("Model not initialized");
@@ -261,7 +306,7 @@ export class LLMClient {
         abortSignal: undefined, // Could add abort controller for cancellation
       });
 
-      await this.processStream(result.textStream, messageId);
+      await this.processStream(result.textStream, messageId, options);
     } catch (error) {
       throw error; // Re-throw to be handled by the caller
     }
@@ -269,7 +314,8 @@ export class LLMClient {
 
   private async processStream(
     textStream: AsyncIterable<string>,
-    messageId: string
+    messageId: string,
+    options?: { styleMode: boolean; activeTabId: string | null; lockStyles: boolean }
   ): Promise<void> {
     let accumulatedText = "";
 
@@ -311,6 +357,290 @@ export class LLMClient {
       content: accumulatedText,
       isComplete: true,
     });
+
+    // If style mode, inject CSS into the active tab
+    if (options?.styleMode && this.window && options.activeTabId) {
+      const activeTab = this.window.activeTab;
+      if (activeTab && activeTab.id === options.activeTabId) {
+        const rawCss = this.extractRawCss(accumulatedText);
+        const css = this.transformCssForSpecificity(rawCss);
+        try {
+          // Remove previously inserted CSS for this tab if exists
+          const previousKey = this.styleCssKeyByTabId.get(options.activeTabId);
+          if (previousKey) {
+            try {
+              await activeTab.webContents.removeInsertedCSS(previousKey);
+            } catch {
+              // ignore removal errors
+            }
+          }
+
+          const key = await activeTab.webContents.insertCSS(css, { cssOrigin: "user" });
+          this.styleCssKeyByTabId.set(options.activeTabId, key);
+          // Fallback: also inject via DOM (handles Shadow DOM/precedence cases)
+          await this.injectCssViaDom(css, options.lockStyles);
+          // Inline-style applier to mimic DevTools (last resort)
+          await this.applyInlineStyles(rawCss, options.lockStyles);
+        } catch (err) {
+          console.error("Failed to insert CSS:", err);
+          // Attempt DOM injection even if insertCSS failed
+          try {
+            await this.injectCssViaDom(css, options.lockStyles);
+            await this.applyInlineStyles(rawCss, options.lockStyles);
+          } catch (e) {
+            console.error("Failed DOM CSS injection:", e);
+          }
+        }
+      }
+    }
+  }
+
+  private extractRawCss(text: string): string {
+    // Strip Markdown fences and <style> wrappers if present
+    let css = text.trim();
+    // Prefer the first fenced block anywhere in the text
+    const anyFenceRegex = /```[a-zA-Z]*\n([\s\S]*?)\n```/m;
+    const anyFenceMatch = css.match(anyFenceRegex);
+    if (anyFenceMatch) {
+      css = anyFenceMatch[1];
+    } else {
+      // If backticks exist but pattern above didn't match (missing newlines), strip backticks greedily
+      css = css.replace(/```[a-zA-Z]*/g, "").replace(/```/g, "");
+    }
+    // <style> ... </style>
+    const styleRegex = /<style[^>]*>([\s\S]*?)<\/style>/i;
+    const styleMatch = css.match(styleRegex);
+    if (styleMatch) {
+      css = styleMatch[1];
+    }
+    return css.trim();
+  }
+
+  private transformCssForSpecificity(css: string): string {
+    // Add !important to each declaration (skip @ rules and comments)
+    const rules = css.split(/}\s*/).map((block) => block.trim()).filter(Boolean);
+    const transformed: string[] = [];
+    for (const rule of rules) {
+      const parts = rule.split("{");
+      if (parts.length < 2) {
+        continue;
+      }
+      const selector = parts[0].trim();
+      const body = parts.slice(1).join("{");
+      if (selector.startsWith("@")) {
+        transformed.push(selector + "{" + body + "}");
+        continue;
+      }
+      const lines = body
+        .split(";")
+        .map((l) => l.trim())
+        .filter((l) => l.length > 0)
+        .map((l) => {
+          if (l.startsWith("@") || l.startsWith("/*") || l.endsWith("!important")) return l;
+          return l + " !important";
+        });
+      const prefixedSelector = selector
+        .split(",")
+        .map((s) => s.trim())
+        .map((s) => (s.startsWith(":root") || s.startsWith("html") ? s : `:root[data-ai-style-scope] ${s}`))
+        .join(", ");
+      transformed.push(`${prefixedSelector}{${lines.join("; ")}}`);
+    }
+    return transformed.join("\n");
+  }
+
+  private async injectCssViaDom(css: string, lockStyles?: boolean): Promise<void> {
+    if (!this.window || !this.window.activeTab) return;
+    const js = `(() => {
+      const STYLE_ATTR = 'data-ai-style';
+      const OBSERVER_FLAG = '__aiStyleObserver__';
+      // Mark scope on root to increase specificity vs utility classes
+      try { document.documentElement.setAttribute('data-ai-style-scope','1'); } catch {}
+      // Remove previous styles
+      document.querySelectorAll('style['+STYLE_ATTR+']').forEach((el) => el.remove());
+      const style = document.createElement('style');
+      style.setAttribute(STYLE_ATTR, '1');
+      style.textContent = ${JSON.stringify(css)};
+      (document.head || document.documentElement).appendChild(style);
+      // Inject into existing shadow roots
+      const injectIntoShadow = (root) => {
+        try {
+          const s = document.createElement('style');
+          s.setAttribute(STYLE_ATTR, '1');
+          s.textContent = ${JSON.stringify(css)};
+          root.appendChild(s);
+        } catch {}
+      };
+      // Inject into same-origin iframes
+      const injectIntoDoc = (doc) => {
+        try {
+          doc.querySelectorAll('style['+STYLE_ATTR+']').forEach((el) => el.remove());
+          const s = doc.createElement('style');
+          s.setAttribute(STYLE_ATTR, '1');
+          s.textContent = ${JSON.stringify(css)};
+          (doc.head || doc.documentElement).appendChild(s);
+          const walker = doc.createTreeWalker(doc, NodeFilter.SHOW_ELEMENT);
+          let node = walker.nextNode();
+          while (node) {
+            const el = node;
+            if (el.shadowRoot) {
+              el.shadowRoot.querySelectorAll('style['+STYLE_ATTR+']').forEach((x) => x.remove());
+              injectIntoShadow(el.shadowRoot);
+            }
+            node = walker.nextNode();
+          }
+        } catch {}
+      };
+      document.querySelectorAll('iframe').forEach((ifr) => {
+        try { if (ifr.contentDocument) injectIntoDoc(ifr.contentDocument); } catch {}
+      });
+      const walker = document.createTreeWalker(document, NodeFilter.SHOW_ELEMENT);
+      let node = walker.nextNode();
+      while (node) {
+        const el = node;
+        if (el.shadowRoot) {
+          // Remove previous
+          el.shadowRoot.querySelectorAll('style['+STYLE_ATTR+']').forEach((x) => x.remove());
+          injectIntoShadow(el.shadowRoot);
+        }
+        node = walker.nextNode();
+      }
+      // Set up a singleton observer to handle dynamically added shadow roots and iframes
+      if (${lockStyles ? "true" : "false"} && !window[OBSERVER_FLAG]) {
+        try {
+          const mo = new MutationObserver((mutations) => {
+            for (const m of mutations) {
+              m.addedNodes && m.addedNodes.forEach((n) => {
+                if (!(n instanceof Element)) return;
+                const el = n;
+                if (el.shadowRoot) {
+                  el.shadowRoot.querySelectorAll('style['+STYLE_ATTR+']').forEach((x) => x.remove());
+                  injectIntoShadow(el.shadowRoot);
+                }
+                if (el.tagName === 'IFRAME') {
+                  try {
+                    const d = el.contentDocument;
+                    if (d) injectIntoDoc(d);
+                  } catch {}
+                }
+                // If subtree has elements with shadowRoot
+                const subWalker = document.createTreeWalker(el, NodeFilter.SHOW_ELEMENT);
+                let sn = subWalker.nextNode();
+                while (sn) {
+                  const se = sn;
+                  if (se.shadowRoot) {
+                    se.shadowRoot.querySelectorAll('style['+STYLE_ATTR+']').forEach((x) => x.remove());
+                    injectIntoShadow(se.shadowRoot);
+                  }
+                  sn = subWalker.nextNode();
+                }
+              });
+            }
+          });
+          mo.observe(document.documentElement, { childList: true, subtree: true });
+          window[OBSERVER_FLAG] = mo;
+        } catch {}
+      }
+    })()`;
+    await this.window.activeTab.runJs(js);
+  }
+
+  private async applyInlineStyles(css: string, lockStyles?: boolean): Promise<void> {
+    if (!this.window || !this.window.activeTab) return;
+    const js = `(() => {
+      const OBSERVER_FLAG = '__aiInlineObserver__';
+      const STYLE_MARK = 'data-ai-inline';
+      const root = document;
+      const src = ${JSON.stringify(css)};
+      const blocks = src.split(/}\s*/).map(b=>b.trim()).filter(Boolean);
+      const rules = [];
+      for (const b of blocks) {
+        const i = b.indexOf('{');
+        if (i === -1) continue;
+        const sel = b.slice(0,i).trim();
+        const body = b.slice(i+1).trim();
+        if (!sel || sel.startsWith('@')) continue;
+        const decls = body.split(';').map(l=>l.trim()).filter(Boolean).map(l=>{
+          const j = l.indexOf(':');
+          if (j === -1) return null;
+          const prop = l.slice(0,j).trim();
+          const val = l.slice(j+1).trim();
+          return [prop, val];
+        }).filter(Boolean);
+        sel.split(',').map(s=>s.trim()).filter(Boolean).forEach(s=>rules.push([s, decls]));
+      }
+      const apply = () => {
+        for (const [sel, decls] of rules) {
+          let scope = root;
+          try {
+            const list = (scope.querySelectorAll ? scope : document).querySelectorAll(sel);
+            list.forEach((el) => {
+              try {
+                decls.forEach(([p,v]) => {
+                  if (!p || !v) return;
+                  el.style.setProperty(p, v.replace(/!important/gi, ''), 'important');
+                });
+                el.setAttribute(STYLE_MARK, '1');
+              } catch {}
+            });
+          } catch {}
+        }
+      };
+      apply();
+      if (${lockStyles ? "true" : "false"} && !window[OBSERVER_FLAG]) {
+        try {
+          const mo = new MutationObserver((mutations) => {
+            for (const m of mutations) {
+              if (m.type === 'childList') {
+                m.addedNodes && m.addedNodes.forEach((n) => {
+                  if (n instanceof Element) apply();
+                });
+              } else if (m.type === 'attributes') {
+                if (m.target instanceof Element) apply();
+              }
+            }
+          });
+          mo.observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'style'] });
+          window[OBSERVER_FLAG] = mo;
+        } catch {}
+      }
+    })()`;
+    await this.window.activeTab.runJs(js);
+  }
+
+  public async clearInjectedStyles(): Promise<void> {
+    if (!this.window || !this.window.activeTab) return;
+    try {
+      const activeTabId = this.window.activeTab.id;
+      const previousKey = this.styleCssKeyByTabId.get(activeTabId);
+      if (previousKey) {
+        try { await this.window.activeTab.webContents.removeInsertedCSS(previousKey); } catch {}
+        this.styleCssKeyByTabId.delete(activeTabId);
+      }
+      const js = `(() => {
+        const STYLE_ATTR = 'data-ai-style';
+        document.querySelectorAll('style['+STYLE_ATTR+']').forEach((el) => el.remove());
+        try { document.documentElement.removeAttribute('data-ai-style-scope'); } catch {}
+        // Disconnect observers
+        try { if (window.__aiStyleObserver__) { window.__aiStyleObserver__.disconnect(); delete window.__aiStyleObserver__; } } catch {}
+        try { if (window.__aiInlineObserver__) { window.__aiInlineObserver__.disconnect(); delete window.__aiInlineObserver__; } } catch {}
+        const walker = document.createTreeWalker(document, NodeFilter.SHOW_ELEMENT);
+        let node = walker.nextNode();
+        while (node) {
+          const el = node;
+          if (el.shadowRoot) {
+            try { el.shadowRoot.querySelectorAll('style['+STYLE_ATTR+']').forEach((x) => x.remove()); } catch {}
+          }
+          if (el.tagName === 'IFRAME') {
+            try { const d = el.contentDocument; if (d) d.querySelectorAll('style['+STYLE_ATTR+']').forEach((x) => x.remove()); } catch {}
+          }
+          node = walker.nextNode();
+        }
+      })()`;
+      await this.window.activeTab.runJs(js);
+    } catch (e) {
+      console.error('Failed to clear injected styles', e);
+    }
   }
 
   private handleStreamError(error: unknown, messageId: string): void {
