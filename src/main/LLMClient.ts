@@ -5,6 +5,10 @@ import { anthropic } from "@ai-sdk/anthropic";
 import { google } from "@ai-sdk/google";
 import * as dotenv from "dotenv";
 import { join } from "path";
+import { defaultGuardrailConfig } from "./guardrails/config";
+import { buildGetSafeVisibleTextScript } from "./guardrails/visibleText";
+import { GuardrailLogger } from "./guardrails/logger";
+import { ocrConsensusFromDataUrl } from "./ocr/OcrConsensus";
 import type { Window } from "./Window";
 
 // Load environment variables from .env file
@@ -41,6 +45,8 @@ export class LLMClient {
   private readonly model: LanguageModel | null;
   private messages: CoreMessage[] = [];
   private styleCssKeyByTabId: Map<string, string> = new Map();
+  private guardrailLogger = new GuardrailLogger();
+  private enableOCR: boolean = process.env.ENABLE_OCR === "true";
 
   constructor(webContents: WebContents) {
     this.webContents = webContents;
@@ -124,15 +130,20 @@ export class LLMClient {
       let screenshot: string | null = null;
       let pageHtml: string | null = null;
       let activeTabId: string | null = null;
+      let pageUrl: string | null = null;
+      let safeText: string | null = null;
       if (this.window) {
         const activeTab = this.window.activeTab;
         if (activeTab) {
           activeTabId = activeTab.id;
-          try {
-            const image = await activeTab.screenshot();
-            screenshot = image.toDataURL();
-          } catch (error) {
-            console.error("Failed to capture screenshot:", error);
+          pageUrl = activeTab.url;
+          if (this.enableOCR) {
+            try {
+              const image = await activeTab.screenshot();
+              screenshot = image.toDataURL();
+            } catch (error) {
+              console.error("Failed to capture screenshot:", error);
+            }
           }
 
           if (request.styleMode) {
@@ -142,19 +153,48 @@ export class LLMClient {
               console.error("Failed to get page HTML:", error);
             }
           }
+          // Compute safe visible text + audit
+          try {
+            const script = buildGetSafeVisibleTextScript(defaultGuardrailConfig);
+            const result = await activeTab.runJs(script);
+            if (result && typeof result === 'object') {
+              // Check if script execution had an error
+              if ('error' in result && result.error) {
+                console.error("❌ Guardrails script execution failed:", result.error);
+                if (result.stack) {
+                  console.error("   Stack trace:", result.stack);
+                }
+                console.error("   Skipping page content to prevent sending unsafe text.");
+                safeText = null;
+              } else {
+                safeText = (result.safeText as string) || null;
+                const auditItems = Array.isArray(result.audit) ? result.audit : null;
+                if (auditItems) {
+                  this.guardrailLogger.logBatch(auditItems as any, { tabId: activeTabId, url: pageUrl });
+                }
+                if (safeText) {
+                  console.log(`✅ Guardrails: Extracted ${safeText.length} chars of safe visible text`);
+                } else {
+                  console.warn("⚠️ Guardrails: No safe text extracted (safeText is null/empty)");
+                }
+              }
+            } else {
+              console.error("❌ Guardrails: Script returned invalid result:", result);
+              safeText = null;
+            }
+          } catch (error) {
+            console.error("❌ Failed to get safe visible text (sanitization failed):", error);
+            console.error("   Skipping page content to prevent sending unsafe/hidden/injected text.");
+            // Don't set safeText - let it remain null to prevent unsafe fallback
+            safeText = null;
+          }
         }
       }
 
       // Build user message content with screenshot first, then text
       const userContent: any[] = [];
       
-      // Add screenshot as the first part if available
-      if (screenshot) {
-        userContent.push({
-          type: "image",
-          image: screenshot,
-        });
-      }
+      // Intentionally do not include screenshots in the LLM prompt
       
       // Add text content
       userContent.push({
@@ -181,7 +221,19 @@ export class LLMClient {
         return;
       }
 
-      const messages = await this.prepareMessagesWithContext(request, pageHtml);
+      // Optional OCR consensus: only use when DOM-safe text is empty
+      if (this.enableOCR && screenshot && (!safeText || safeText.trim().length === 0)) {
+        try {
+          const ocrText = await ocrConsensusFromDataUrl(screenshot, {});
+          if (ocrText) {
+            safeText = ocrText;
+          }
+        } catch (e) {
+          console.error('OCR consensus failed:', e);
+        }
+      }
+
+      const messages = await this.prepareMessagesWithContext(request, pageHtml, safeText ?? null, pageUrl);
       await this.streamResponse(messages, request.messageId, {
         styleMode: !!request.styleMode,
         activeTabId,
@@ -206,19 +258,25 @@ export class LLMClient {
     this.webContents.send("chat-messages-updated", this.messages);
   }
 
-  private async prepareMessagesWithContext(request: ChatRequest, pageHtml: string | null): Promise<CoreMessage[]> {
-    // Get page context from active tab
-    let pageUrl: string | null = null;
-    let pageText: string | null = null;
+  private async prepareMessagesWithContext(request: ChatRequest, pageHtml: string | null, pageTextOverride: string | null, pageUrl?: string | null): Promise<CoreMessage[]> {
+    // Use provided text/url if present; otherwise fallback
+    let pageText: string | null = pageTextOverride ?? null;
+    let url: string | null = pageUrl ?? null;
     
-    if (this.window) {
-      const activeTab = this.window.activeTab;
-      if (activeTab) {
-        pageUrl = activeTab.url;
-        try {
-          pageText = await activeTab.getTabText();
-        } catch (error) {
-          console.error("Failed to get page text:", error);
+    // SECURITY: Only use safe sanitized text. Do NOT fallback to unsafe getTabText() 
+    // if sanitization failed (pageTextOverride is null). This prevents sending hidden/injected content.
+    if (!pageText || !url) {
+      if (this.window) {
+        const activeTab = this.window.activeTab;
+        if (activeTab) {
+          if (!url) url = activeTab.url;
+          // Only fallback to getTabText if we have no sanitized text AND it's not a security concern
+          // In practice, if pageTextOverride is null, it means sanitization failed, so we skip unsafe fallback
+          if (!pageText && !request.styleMode) {
+            console.warn("⚠️ Skipping unsafe page text extraction. Using sanitized text only.");
+            // Don't use getTabText() as it includes hidden/injected content
+            pageText = null;
+          }
         }
       }
     }
@@ -227,8 +285,8 @@ export class LLMClient {
     const systemMessage: CoreMessage = {
       role: "system",
       content: request.styleMode
-        ? this.buildStyleModeSystemPrompt(pageUrl, pageHtml)
-        : this.buildSystemPrompt(pageUrl, pageText),
+        ? this.buildStyleModeSystemPrompt(url, pageHtml)
+        : this.buildSystemPrompt(url, pageText),
     };
 
     // Include all messages in history (system + conversation)
@@ -239,7 +297,6 @@ export class LLMClient {
     const parts: string[] = [
       "You are a helpful AI assistant integrated into a web browser.",
       "You can analyze and discuss web pages with the user.",
-      "The user's messages may include screenshots of the current page as the first image.",
     ];
 
     if (url) {
@@ -296,6 +353,13 @@ export class LLMClient {
     if (!this.model) {
       throw new Error("Model not initialized");
     }
+
+    // Log full prompt before sending AI request
+    console.log("=".repeat(80));
+    console.log("📤 Full AI Prompt (before sending request):");
+    console.log("=".repeat(80));
+    console.log(JSON.stringify(messages, null, 2));
+    console.log("=".repeat(80));
 
     try {
       const result = await streamText({
