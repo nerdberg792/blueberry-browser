@@ -45,6 +45,19 @@ interface SidebarAPI {
 
   // Tab information
   getActiveTabInfo: () => Promise<TabInfo | null>;
+
+  // Autonomous agent
+  startAgentTask: (payload: {
+    goal: string;
+    context?: Record<string, unknown>;
+  }) => Promise<any>;
+  getAgentTasks: () => Promise<any[]>;
+  getAgentTask: (taskId: string) => Promise<any | null>;
+  getAgentTools: () => Promise<any[]>;
+  subscribeAgentEvents: (
+    callback: (event: { type: string; payload: any }) => void
+  ) => () => void;
+  removeAgentEventsListener: () => void;
 }
 
 declare global {

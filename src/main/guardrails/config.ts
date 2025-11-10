@@ -13,6 +13,14 @@ export interface GuardrailConfig {
   cssSuspiciousProps: string[];
 }
 
+export interface AgentSafetyConfig {
+  maxSteps: number;
+  maxParallelTasks: number;
+  maxWaitMs: number;
+  blockedOrigins: string[];
+  restrictedSelectors: string[];
+}
+
 export const defaultGuardrailConfig: GuardrailConfig = {
   minContrast: 4.5,
   minOpacity: 0.8,
@@ -50,6 +58,14 @@ export const defaultGuardrailConfig: GuardrailConfig = {
     "text-shadow:",
     "filter:",
   ],
+};
+
+export const agentSafetyConfig: AgentSafetyConfig = {
+  maxSteps: 10,
+  maxParallelTasks: 1,
+  maxWaitMs: 15000,
+  blockedOrigins: ["chrome://", "file://", "about:blank"],
+  restrictedSelectors: ["input[type=\"password\"]", "input[type=\"email\"]", "form[action*=\"logout\"]"],
 };
 
 

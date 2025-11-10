@@ -57,6 +57,28 @@ const sidebarAPI = {
 
   // Tab information
   getActiveTabInfo: () => electronAPI.ipcRenderer.invoke("get-active-tab-info"),
+
+  // Autonomous agent
+  startAgentTask: (payload: { goal: string; context?: Record<string, unknown> }) =>
+    electronAPI.ipcRenderer.invoke("agent-start-task", payload),
+  getAgentTasks: () => electronAPI.ipcRenderer.invoke("agent-get-tasks"),
+  getAgentTask: (taskId: string) =>
+    electronAPI.ipcRenderer.invoke("agent-get-task", taskId),
+  getAgentTools: () => electronAPI.ipcRenderer.invoke("agent-get-tools"),
+  subscribeAgentEvents: (
+    callback: (event: { type: string; payload: any }) => void
+  ): (() => void) => {
+    const listener = (_: unknown, message: { type: string; payload: any }) =>
+      callback(message);
+    electronAPI.ipcRenderer.on("agent:event", listener);
+    electronAPI.ipcRenderer.send("agent-subscribe");
+    return () => {
+      electronAPI.ipcRenderer.removeListener("agent:event", listener);
+    };
+  },
+  removeAgentEventsListener: () => {
+    electronAPI.ipcRenderer.removeAllListeners("agent:event");
+  },
 };
 
 // Use `contextBridge` APIs to expose Electron APIs to

@@ -34,7 +34,8 @@
     "react-markdown": "^10.1.0",
     "remark-breaks": "^4.0.0",
     "remark-gfm": "^4.0.1",
-    "tesseract.js": "^6.0.1"
+    "tesseract.js": "^6.0.1",
+    "ws": "^8.18.0"
   },
   "devDependencies": {
     "@electron-toolkit/eslint-config-prettier": "^3.0.0",

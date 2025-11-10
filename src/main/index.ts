@@ -1,17 +1,25 @@
 import { app, BrowserWindow } from "electron";
 import { electronApp } from "@electron-toolkit/utils";
 import { Window } from "./Window";
+import { AgentBridge } from "./AgentBridge";
 import { AppMenu } from "./Menu";
 import { EventManager } from "./EventManager";
+import { createAgentExecutor } from "./AgentExecutor";
 
 let mainWindow: Window | null = null;
 let eventManager: EventManager | null = null;
 let menu: AppMenu | null = null;
+let agentBridge: AgentBridge | null = null;
 
 const createWindow = (): Window => {
   const window = new Window();
+  agentBridge = new AgentBridge(window);
+  agentBridge.registerExecutor(createAgentExecutor(window));
+  void agentBridge.start().catch((error) => {
+    console.error("Failed to start agent bridge:", error);
+  });
   menu = new AppMenu(window);
-  eventManager = new EventManager(window);
+  eventManager = new EventManager(window, agentBridge);
   return window;
 };
 
@@ -41,6 +49,12 @@ app.on("window-all-closed", () => {
   }
   if (menu) {
     menu = null;
+  }
+  if (agentBridge) {
+    void agentBridge.stop().catch((error) => {
+      console.error("Failed to stop agent bridge:", error);
+    });
+    agentBridge = null;
   }
 
   if (process.platform !== "darwin") {

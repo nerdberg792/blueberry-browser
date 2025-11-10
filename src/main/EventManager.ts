@@ -1,11 +1,14 @@
 import { ipcMain, WebContents } from "electron";
 import type { Window } from "./Window";
+import { AgentBridge } from "./AgentBridge";
 
 export class EventManager {
   private mainWindow: Window;
+  private agentBridge?: AgentBridge;
 
-  constructor(mainWindow: Window) {
+  constructor(mainWindow: Window, agentBridge?: AgentBridge) {
     this.mainWindow = mainWindow;
+    this.agentBridge = agentBridge;
     this.setupEventHandlers();
   }
 
@@ -24,6 +27,9 @@ export class EventManager {
 
     // Debug events
     this.handleDebugEvents();
+
+    // Agent events
+    this.handleAgentEvents();
   }
 
   private handleTabEvents(): void {
@@ -227,6 +233,33 @@ export class EventManager {
   private handleDebugEvents(): void {
     // Ping test
     ipcMain.on("ping", () => console.log("pong"));
+  }
+
+  private handleAgentEvents(): void {
+    if (!this.agentBridge) {
+      return;
+    }
+    ipcMain.handle("agent-start-task", async (_, payload) => {
+      const { goal, context } = payload ?? {};
+      const task = await this.agentBridge?.createTask(goal, context);
+      return task;
+    });
+
+    ipcMain.handle("agent-get-tasks", () => {
+      return this.agentBridge?.listTasks() ?? [];
+    });
+
+    ipcMain.handle("agent-get-task", (_, taskId: string) => {
+      return this.agentBridge?.getTask(taskId) ?? null;
+    });
+
+    ipcMain.handle("agent-get-tools", () => {
+      return this.agentBridge?.getTools() ?? [];
+    });
+
+    ipcMain.on("agent-subscribe", (event) => {
+      this.agentBridge?.subscribe(event.sender);
+    });
   }
 
   private broadcastDarkMode(sender: WebContents, isDarkMode: boolean): void {
